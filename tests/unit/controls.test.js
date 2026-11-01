@@ -436,6 +436,148 @@ describe("CADTrackballControls", () => {
     });
   });
 
+  describe("cursor pivot", () => {
+    const pointer = (type, x, y) => {
+      const event = new PointerEvent(type, { button: 0 });
+      for (const [key, value] of Object.entries({
+        pageX: x,
+        pageY: y,
+        clientX: x,
+        clientY: y,
+      })) {
+        Object.defineProperty(event, key, { value });
+      }
+      return event;
+    };
+
+    const drag = (x0, y0, x1, y1) => {
+      domElement.dispatchEvent(pointer("pointerdown", x0, y0));
+      domElement.dispatchEvent(pointer("pointermove", x1, y1));
+      controls.update();
+      domElement.dispatchEvent(pointer("pointerup", x1, y1));
+    };
+
+    const onScreen = (point) => {
+      camera.updateMatrixWorld();
+      return point.clone().project(camera);
+    };
+
+    const expectFixedOnScreen = (point, before) => {
+      const after = onScreen(point);
+      expect(after.x).toBeCloseTo(before.x);
+      expect(after.y).toBeCloseTo(before.y);
+    };
+
+    test("a rotate drag asks the picker for the pivot at the pointer", () => {
+      controls = new CADTrackballControls(camera, domElement);
+      controls.pivotPicker = vi.fn(() => null);
+
+      domElement.dispatchEvent(pointer("pointerdown", 100, 200));
+
+      expect(controls.pivotPicker).toHaveBeenCalledWith(100, 200);
+    });
+
+    test("holroyd: rotates around the picked point, which stays on screen", () => {
+      controls = new CADTrackballControls(camera, domElement);
+      const pivot = new THREE.Vector3(3, 2, 0);
+      controls.pivotPicker = () => pivot.clone();
+      const before = onScreen(pivot);
+      const distance = camera.position.distanceTo(pivot);
+
+      drag(400, 300, 480, 340);
+
+      expectFixedOnScreen(pivot, before);
+      expect(camera.position.distanceTo(pivot)).toBeCloseTo(distance);
+      expect(controls.target.length()).toBeGreaterThan(0.1);
+    });
+
+    test("holroyd off: rotates around the picked point, which stays on screen", () => {
+      controls = new CADTrackballControls(camera, domElement);
+      controls.holroyd = false;
+      controls.staticMoving = true;
+      const pivot = new THREE.Vector3(3, 2, 0);
+      controls.pivotPicker = () => pivot.clone();
+      const before = onScreen(pivot);
+      const distance = camera.position.distanceTo(pivot);
+
+      controls._onMouseDown(pointer("pointerdown", 400, 300));
+      controls._moveCurr.set(0.3, 0.2);
+      controls.update();
+
+      expectFixedOnScreen(pivot, before);
+      expect(camera.position.distanceTo(pivot)).toBeCloseTo(distance);
+      expect(controls.target.length()).toBeGreaterThan(0.1);
+    });
+
+    test("without a hit it rotates around the target", () => {
+      controls = new CADTrackballControls(camera, domElement);
+      controls.pivotPicker = () => null;
+
+      drag(400, 300, 480, 340);
+
+      expect(controls.target.length()).toBeCloseTo(0);
+    });
+
+    const wheel = (x, y) => {
+      const event = new WheelEvent("wheel", { deltaY: -400, cancelable: true });
+      // happy-dom's WheelEvent ignores the client coordinates in its init dict
+      Object.defineProperty(event, "clientX", { value: x });
+      Object.defineProperty(event, "clientY", { value: y });
+      domElement.dispatchEvent(event);
+    };
+
+    // The world point under client (x, y) on the plane through the target.
+    const underCursor = (x, y) => {
+      camera.updateMatrixWorld();
+      const ndc = new THREE.Vector2((x / 800) * 2 - 1, 1 - (y / 600) * 2);
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, camera);
+      const normal = camera.getWorldDirection(new THREE.Vector3());
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+        normal,
+        controls.target,
+      );
+      return ray.ray.intersectPlane(plane, new THREE.Vector3());
+    };
+
+    test("perspective: the wheel zooms towards the cursor", () => {
+      controls = new CADTrackballControls(camera, domElement);
+      controls.zoomToCursor = true;
+      const point = underCursor(600, 150);
+      const before = onScreen(point);
+      const distance = camera.position.distanceTo(controls.target);
+
+      wheel(600, 150);
+
+      expect(camera.position.distanceTo(controls.target)).toBeLessThan(
+        distance,
+      );
+      expectFixedOnScreen(point, before);
+    });
+
+    test("orthographic: the wheel zooms towards the cursor", () => {
+      camera = new THREE.OrthographicCamera(-4, 4, 3, -3, 0.1, 1000);
+      camera.position.set(0, 0, 10);
+      controls = new CADTrackballControls(camera, domElement);
+      controls.zoomToCursor = true;
+      const point = underCursor(600, 150);
+      const before = onScreen(point);
+
+      wheel(600, 150);
+
+      expect(camera.zoom).toBeGreaterThan(1);
+      expectFixedOnScreen(point, before);
+    });
+
+    test("without zoomToCursor the wheel zooms towards the target", () => {
+      controls = new CADTrackballControls(camera, domElement);
+
+      wheel(600, 150);
+
+      expect(controls.target.length()).toBeCloseTo(0);
+    });
+  });
+
   describe("dispose", () => {
     test("removes event listeners", () => {
       controls = new CADTrackballControls(camera, domElement);
@@ -981,16 +1123,22 @@ describe("Controls", () => {
       expect(controls.controls.pivotPicker).toBe(null);
     });
 
-    test("is ignored by trackball controls", () => {
+    test("turns on zoom to cursor and the pivot picker for trackball controls", () => {
       controls = new Controls(
         "trackball",
         camera,
         new THREE.Vector3(),
         domElement,
       );
+      const picker = () => null;
 
-      expect(() => controls.setCursorPivot(true, () => null)).not.toThrow();
-      expect(controls.controls.pivotPicker).toBeUndefined();
+      controls.setCursorPivot(true, picker);
+      expect(controls.controls.zoomToCursor).toBe(true);
+      expect(controls.controls.pivotPicker).toBe(picker);
+
+      controls.setCursorPivot(false, picker);
+      expect(controls.controls.zoomToCursor).toBe(false);
+      expect(controls.controls.pivotPicker).toBe(null);
     });
   });
 

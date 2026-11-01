@@ -32,6 +32,10 @@ declare module "three/examples/jsm/controls/TrackballControls.js" {
      * Internal: pan camera based on mouse movement
      */
     _panCamera(): void;
+    /**
+     * Internal: zoom camera based on wheel or drag movement
+     */
+    _zoomCamera(): void;
   }
 }
 

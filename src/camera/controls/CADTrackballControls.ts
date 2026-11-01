@@ -5,6 +5,10 @@
  * - Holroyd (non-tumbling) trackball rotation mode
  * - rotateX/Y/Z methods for programmatic world-axis rotation
  * - Quaternion-based saveState/reset
+ * - Pivot under the cursor: a rotate drag that starts on geometry turns around
+ *   the picked surface point (see {@link CADTrackballControls.pivotPicker})
+ * - Zoom towards the cursor for the wheel and trackpad pinch
+ *   (see {@link CADTrackballControls.zoomToCursor})
  *
  * Internal TrackballControls methods/properties used (see three-augmentation.d.ts):
  * - _onMouseDown: Replaced to customize modifier key behavior (shift=pan)
@@ -12,7 +16,7 @@
  * - _getMouseOnScreen: Called to convert page coordinates for pan/zoom
  * - _rotateCamera: Overridden to implement holroyd sphere projection
  * - _panCamera: Overridden to use quaternion-based camera orientation in holroyd mode
- * - _zoomCamera: Called for zoom handling
+ * - _zoomCamera: Overridden to zoom towards the cursor
  * - _moveCurr/_movePrev: Rotation tracking vectors
  * - _zoomStart/_zoomEnd: Zoom tracking vectors
  * - _panStart/_panEnd: Pan tracking vectors
@@ -24,7 +28,7 @@
  */
 
 import { TrackballControls } from "three/examples/jsm/controls/TrackballControls.js";
-import { MOUSE, Quaternion, Vector2, Vector3, Camera } from "three";
+import { MOUSE, Matrix4, Quaternion, Vector2, Vector3, Camera } from "three";
 import {
   KeyMapper,
   AXIS_VECTORS,
@@ -32,6 +36,7 @@ import {
   isPerspectiveCamera,
 } from "../../utils/utils.js";
 import type { Axis } from "../../core/types.js";
+import { pivotShift, type PivotPicker } from "./cursor-pivot.js";
 
 // State constants matching TrackballControls internal state
 const STATE = {
@@ -56,6 +61,32 @@ const _panDirection = new Vector3();
 const _cameraUp = new Vector3();
 const _cameraRight = new Vector3();
 
+// Reusable objects for the cursor pivot and zoom to cursor
+const _pivotShift = new Vector3();
+const _eyeBefore = new Vector3();
+const _upBefore = new Vector3();
+const _frame = new Matrix4();
+const _frameBefore = new Quaternion();
+const _frameRotation = new Quaternion();
+const _origin = new Vector3();
+const _ndc = new Vector2();
+const _zoomPoint = new Vector3();
+const _zoomPointAfter = new Vector3();
+const _rayDirection = new Vector3();
+const _viewDirection = new Vector3();
+
+/**
+ * The orientation of a camera frame given by its eye vector (camera - target)
+ * and up vector, as a quaternion.
+ */
+function frameQuaternion(
+  eye: Vector3,
+  up: Vector3,
+  out: Quaternion,
+): Quaternion {
+  return out.setFromRotationMatrix(_frame.lookAt(eye, _origin, up));
+}
+
 class CADTrackballControls extends TrackballControls {
   holroyd: boolean;
   radius: number;
@@ -70,6 +101,18 @@ class CADTrackballControls extends TrackballControls {
   private _holroydPointerUp?: () => void;
   private _holroydWheel?: (event: WheelEvent) => void;
   private _parentOnMouseDown!: (event: MouseEvent) => void;
+  /**
+   * Picks the rotation pivot when a rotate drag starts. `null` keeps the
+   * classic behavior of rotating around `target`.
+   */
+  pivotPicker: PivotPicker | null;
+  /**
+   * Zoom towards the cursor for the wheel and trackpad pinch, instead of
+   * towards the center of the view.
+   */
+  zoomToCursor: boolean;
+  private _pivot: Vector3 | null;
+  private _zoomCursor: Vector2 | null;
 
   // Expose internal properties for type safety
   declare state: number;
@@ -92,7 +135,6 @@ class CADTrackballControls extends TrackballControls {
   declare _onMouseDown: (event: MouseEvent) => void;
   declare _getMouseOnCircle: (pageX: number, pageY: number) => Vector2;
   declare _getMouseOnScreen: (pageX: number, pageY: number) => Vector2;
-  declare _zoomCamera: () => void;
 
   /**
    * Constructs CAD-enhanced trackball controls.
@@ -130,6 +172,13 @@ class CADTrackballControls extends TrackballControls {
     this._horizontalRotate = true; // meta key restricts to horizontal only
     this._verticalRotate = true; // ctrl key restricts to vertical only
 
+    // The parent constructor already calls update(), before these are set, so
+    // the checks against _pivot and _zoomCursor use == null.
+    this.pivotPicker = null;
+    this.zoomToCursor = false;
+    this._pivot = null;
+    this._zoomCursor = null;
+
     // Add our own pointer event listeners to capture raw coordinates
     // This runs alongside the parent's handlers
     if (domElement) {
@@ -159,6 +208,10 @@ class CADTrackballControls extends TrackballControls {
     // When holroyd is disabled, use pure Three.js TrackballControls behavior
     if (!this.holroyd) {
       this._parentOnMouseDown(event);
+      this._pivot =
+        this.state === STATE.ROTATE && !this.noRotate
+          ? this._pickPivot(event)
+          : null;
       return;
     }
 
@@ -199,6 +252,9 @@ class CADTrackballControls extends TrackballControls {
 
     const state = this.keyState !== STATE.NONE ? this.keyState : this.state;
 
+    this._pivot =
+      state === STATE.ROTATE && !this.noRotate ? this._pickPivot(event) : null;
+
     if (state === STATE.ROTATE && !this.noRotate) {
       this._moveCurr.copy(this._getMouseOnCircle(event.pageX, event.pageY));
       this._movePrev.copy(this._moveCurr);
@@ -211,6 +267,19 @@ class CADTrackballControls extends TrackballControls {
     }
 
     this.dispatchEvent({ type: "start" });
+  }
+
+  /**
+   * The pivot for a rotate drag starting at `event`, or `null` to rotate
+   * around `target`.
+   *
+   * It is kept after the pointer is released, not cleared like the orbit
+   * controls' pivot: with holroyd off, the parent's damping keeps rotating for
+   * a moment after release, and that should turn around the same point. The
+   * next pointer down replaces it.
+   */
+  private _pickPivot(event: MouseEvent): Vector3 | null {
+    return this.pivotPicker?.(event.clientX, event.clientY) ?? null;
   }
 
   /**
@@ -272,9 +341,14 @@ class CADTrackballControls extends TrackballControls {
    * Handle wheel events for zoom - call update after parent processes wheel.
    * This enables change-listener mode (non-animation loop) to work for zoom.
    */
-  private _onHolroydWheel(): void {
+  private _onHolroydWheel(event: WheelEvent): void {
     // Parent's wheel handler already processed the event, just call update
-    this.update();
+    this._zoomCursor = new Vector2(event.clientX, event.clientY);
+    try {
+      this.update();
+    } finally {
+      this._zoomCursor = null;
+    }
 
     // TrackballControls uses dynamic damping (staticMoving=false) which only
     // consumes ~20% of the zoom delta per update() call. In animation-loop mode
@@ -443,7 +517,22 @@ class CADTrackballControls extends TrackballControls {
   _rotateCamera(): void {
     if (!this.holroyd) {
       // Use default TrackballControls rotation
+      const pivot = this._pivot;
+      if (pivot == null) {
+        super._rotateCamera();
+        return;
+      }
+      // The parent rotates the eye and up vectors by a rotation it does not
+      // expose, so recover it from the camera frame before and after.
+      _eyeBefore.copy(this._eye);
+      _upBefore.copy(this.object.up);
       super._rotateCamera();
+      frameQuaternion(_eyeBefore, _upBefore, _frameBefore).invert();
+      frameQuaternion(this._eye, this.object.up, _frameRotation);
+      _frameRotation.multiply(_frameBefore);
+      this.target.add(
+        pivotShift(_frameRotation, this.target, pivot, _pivotShift),
+      );
       return;
     }
 
@@ -492,6 +581,14 @@ class CADTrackballControls extends TrackballControls {
       // single-frame view flips. One normalize() per rotation keeps it unit.
       this.object.quaternion.normalize();
       this._eye.applyQuaternion(_quaternion);
+
+      // Turn around the pivot instead of the target: update() puts the camera
+      // at target + eye, so moving the target moves the camera with it.
+      if (this._pivot != null) {
+        this.target.add(
+          pivotShift(_quaternion, this.target, this._pivot, _pivotShift),
+        );
+      }
     }
 
     // Update start to end for next frame
@@ -499,6 +596,62 @@ class CADTrackballControls extends TrackballControls {
 
     // Keep parent state consistent
     this._movePrev.copy(this._moveCurr);
+  }
+
+  /**
+   * Zoom towards the cursor for the wheel and trackpad pinch.
+   *
+   * The parent zooms towards the target: it scales the eye vector of a
+   * perspective camera, or the zoom of an orthographic one. Moving the target
+   * as well keeps the point under the cursor in place:
+   * - perspective: the point where the cursor ray meets the plane through the
+   *   target. Scaling camera and target about it by the same factor keeps its
+   *   projection, as three.js OrbitControls' `zoomToCursor` does;
+   * - orthographic: the world point under the cursor, exactly, since depth
+   *   does not change where a point lands on screen.
+   */
+  _zoomCamera(): void {
+    const cursor = this._zoomCursor;
+    if (!this.zoomToCursor || cursor == null || this.domElement == null) {
+      super._zoomCamera();
+      return;
+    }
+
+    const rect = (this.domElement as HTMLElement).getBoundingClientRect();
+    _ndc.set(
+      ((cursor.x - rect.left) / rect.width) * 2 - 1,
+      1 - ((cursor.y - rect.top) / rect.height) * 2,
+    );
+    this.object.updateMatrixWorld();
+
+    if (isPerspectiveCamera(this.object)) {
+      const distance = this._eye.length();
+      _rayDirection
+        .set(_ndc.x, _ndc.y, 0.5)
+        .unproject(this.object)
+        .sub(this.object.position)
+        .normalize();
+      this.object.getWorldDirection(_viewDirection);
+      const facing = _rayDirection.dot(_viewDirection);
+      super._zoomCamera();
+      if (facing <= 0 || distance === 0) return;
+      const depth =
+        _zoomPoint
+          .subVectors(this.target, this.object.position)
+          .dot(_viewDirection) / facing;
+      _zoomPoint
+        .copy(this.object.position)
+        .addScaledVector(_rayDirection, depth);
+      this.target.lerp(_zoomPoint, 1 - this._eye.length() / distance);
+    } else if (isOrthographicCamera(this.object)) {
+      _zoomPoint.set(_ndc.x, _ndc.y, 0).unproject(this.object);
+      super._zoomCamera();
+      this.object.updateProjectionMatrix();
+      _zoomPointAfter.set(_ndc.x, _ndc.y, 0).unproject(this.object);
+      this.target.add(_zoomPoint.sub(_zoomPointAfter));
+    } else {
+      super._zoomCamera();
+    }
   }
 
   /**

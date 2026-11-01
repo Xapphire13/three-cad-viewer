@@ -484,7 +484,7 @@ class ViewerState {
     clipSlider2: -1,
     control: "orbit",
     holroyd: true,
-    cursorPivot: false,
+    cursorPivot: true,
     up: "Z",
     ticks: 10,
     gridFontSize: 10,

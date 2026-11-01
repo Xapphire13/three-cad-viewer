@@ -5,8 +5,8 @@
  * - Public rotateLeft/rotateUp methods for programmatic rotation
  * - Quaternion-based saveState/reset
  * - Modifier key rotation restrictions (ctrl: vertical only, meta: horizontal only)
- * - Optional pivot under the cursor: a rotate drag that starts on geometry orbits
- *   around the picked surface point (see {@link CADOrbitControls.pivotPicker})
+ * - Pivot under the cursor: a rotate drag that starts on geometry orbits around
+ *   the picked surface point (see {@link CADOrbitControls.pivotPicker})
  *
  * Internal OrbitControls methods/properties used (see three-augmentation.d.ts):
  * - _onMouseDown: Replaced to customize modifier key behavior (shift=pan, ctrl/meta=rotate with axis lock)
@@ -26,6 +26,7 @@ import {
   isOrthographicCamera,
   isPerspectiveCamera,
 } from "../../utils/utils.js";
+import { pivotShift, type PivotPicker } from "./cursor-pivot.js";
 
 // State constants matching OrbitControls internal state
 const STATE = {
@@ -35,15 +36,9 @@ const STATE = {
   PAN: 2,
 };
 
-/**
- * Resolves the world-space point under a client (page viewport) coordinate, or
- * `null` when there is no visible geometry there.
- */
-type PivotPicker = (clientX: number, clientY: number) => Vector3 | null;
-
 // Reusable objects for the pivot correction in update()
-const _quaternionBefore = new Quaternion();
-const _pivotOffset = new Vector3();
+const _rotation = new Quaternion();
+const _targetBefore = new Vector3();
 const _pivotShift = new Vector3();
 
 class CADOrbitControls extends OrbitControls {
@@ -236,9 +231,7 @@ class CADOrbitControls extends OrbitControls {
    * OrbitControls always rotates the camera around `target` and looks at it, so
    * pointing `target` at the pivot would snap the view. Instead, let the parent
    * rotate around `target`, then translate camera and target together so the
-   * rotation is effectively about the pivot: with q the rotation just applied
-   * and r = target - pivot, the shift is q·r - r. The pivot stays fixed on
-   * screen and `target` drifts with it.
+   * rotation is effectively about the pivot (see {@link pivotShift}).
    *
    * The parent dispatches "change" before the shift is applied, which would
    * render the uncorrected frame, so it is muted and re-dispatched after.
@@ -249,8 +242,8 @@ class CADOrbitControls extends OrbitControls {
       return super.update(deltaTime);
     }
 
-    _quaternionBefore.copy(this.object.quaternion).invert();
-    _pivotOffset.subVectors(this.target, pivot);
+    _rotation.copy(this.object.quaternion).invert();
+    _targetBefore.copy(this.target);
 
     this._muteChange = true;
     let changed: boolean;
@@ -260,9 +253,8 @@ class CADOrbitControls extends OrbitControls {
       this._muteChange = false;
     }
 
-    _quaternionBefore.premultiply(this.object.quaternion);
-    _pivotShift.copy(_pivotOffset).applyQuaternion(_quaternionBefore);
-    _pivotShift.sub(_pivotOffset);
+    _rotation.premultiply(this.object.quaternion);
+    pivotShift(_rotation, _targetBefore, pivot, _pivotShift);
     this.object.position.add(_pivotShift);
     this.target.add(_pivotShift);
     this._lastPosition.copy(this.object.position);
@@ -326,4 +318,3 @@ class CADOrbitControls extends OrbitControls {
 }
 
 export { CADOrbitControls };
-export type { PivotPicker };

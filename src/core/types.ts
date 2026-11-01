@@ -360,7 +360,7 @@ export interface ViewerOptions extends StudioModeOptions {
   clipSlider2?: number;
   /** Holroyd mode for controls (default: true) */
   holroyd?: boolean;
-  /** Orbit around and zoom towards the point under the cursor (orbit controls only, default: false) */
+  /** Rotate around and zoom towards the point under the cursor; false restores rotating and zooming around the target (default: true) */
   cursorPivot?: boolean;
   /** Up direction (default: "Z") */
   up?: UpDirection;

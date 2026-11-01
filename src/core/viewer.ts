@@ -4291,8 +4291,8 @@ class Viewer {
   }
 
   /**
-   * Set cursor pivot mode: orbit around and zoom towards the point under the
-   * cursor. Orbit controls only; trackball controls ignore it.
+   * Set cursor pivot mode: rotate around and zoom towards the point under the
+   * cursor. When off, rotation and zoom are around the target, as before.
    * @param flag - whether to enable cursor pivot mode.
    * @param notify - whether to send notification or not.
    */

@@ -1,7 +1,7 @@
 import * as THREE from "three";
 
 import { CADOrbitControls } from "./controls/CADOrbitControls.js";
-import type { PivotPicker } from "./controls/CADOrbitControls.js";
+import type { PivotPicker } from "./controls/cursor-pivot.js";
 import { CADTrackballControls } from "./controls/CADTrackballControls.js";
 import type { ControlType } from "../core/types";
 
@@ -216,16 +216,13 @@ class Controls {
   }
 
   /**
-   * Rotate around and zoom towards the point under the cursor (OrbitControls
-   * only; trackball controls ignore it).
+   * Rotate around and zoom towards the point under the cursor.
    * @param flag - cursor pivot enabled.
    * @param picker - resolves the world-space point under a client coordinate.
    */
   setCursorPivot(flag: boolean, picker: PivotPicker): void {
-    if (this.controls instanceof CADOrbitControls) {
-      this.controls.zoomToCursor = flag;
-      this.controls.pivotPicker = flag ? picker : null;
-    }
+    this.controls.zoomToCursor = flag;
+    this.controls.pivotPicker = flag ? picker : null;
   }
 
   /**
